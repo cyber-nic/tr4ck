@@ -6,22 +6,26 @@ import (
 	"path/filepath"
 
 	"github.com/go-git/go-git/v5"
-	"github.com/google/uuid"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
-	
+
+const version = "0.1.0"
+
 var registryFilePath string
 
 type Registry struct {
-	Entries map[string]string
+	Repos map[string]string
 }
 
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).With().Caller().Logger()
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -31,82 +35,100 @@ func init() {
 	registryFilePath = filepath.Join(homeDir, ".tr4ck_registry.json")
 }
 
+func cloneRepo(commitHash, repoURL string) (string, error) {
+	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", commitHash)
+	log.Debug().Str("src", repoURL).Str("dst", dst).Msg(aurora.BrightYellow(repoURL).String())
 
-func cloneRepo(repoURL string) {
-	tmpDir := filepath.Join(os.TempDir(), "tr4ck", "archives", uuid.New().String())
-
-	repo, err := git.PlainClone(tmpDir, false, &git.CloneOptions{
-		URL: repoURL,
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to clone the repository")
-		return
-	}
-
-	ref, err := repo.Head()
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get HEAD reference")
-		return
-	}
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get commit object")
-		return
-	}
-	commitHash := commit.Hash.String()
-
-	destDir := filepath.Join(os.TempDir(), "tr4ck", "archives", commitHash)
-	log.Info().Str("src", repoURL).Str("tmp", tmpDir).Str("dst", destDir).Msg(aurora.Green("Cloning").String())
-
-	if _, err := os.Stat(destDir); !os.IsNotExist(err) {
-		log.Info().Str("dir", destDir).Msg("Directory already exists, performing re-sync")
-		repo, err = git.PlainOpen(destDir)
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		repo, err := git.PlainOpen(dst)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to open existing repository")
-			return
+			return commitHash, fmt.Errorf("failed to open existing repository: %w", err)
 		}
 		w, err := repo.Worktree()
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to get worktree")
-			return
+			return commitHash, fmt.Errorf("failed to get worktree: %w", err)
 		}
 		err = w.Pull(&git.PullOptions{RemoteName: "origin"})
 		if err != nil && err != git.NoErrAlreadyUpToDate {
-			log.Error().Err(err).Msg("Failed to pull updates")
-			return
+			return commitHash, fmt.Errorf("failed to pull updates: %w", err)
 		}
-		log.Info().Msg("Repository re-synced successfully")
-	} else {
-		err = os.Rename(tmpDir, destDir)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to rename directory")
-			return
-		}
-		log.Info().Str("dir", destDir).Msg("Repository cloned successfully")
 	}
 
-	err = updateRegistry(repoURL, commitHash)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to update registry")
-	}
+	return dst, nil
 }
 
+func getRepoGUIDFromFirstCommit(repoURL string) (string, error) {
+	// Initialize a new in-memory repository
+	storer := memory.NewStorage()
+	repo, err := git.Init(storer, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to initialize repository: %v", err)
+	}
+
+	// Add a new remote with the given URL
+	_, err = repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{repoURL},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create remote: %v", err)
+	}
+
+	// Fetch the very first commit
+	fetchOptions := &git.FetchOptions{
+		RemoteName: "origin",
+		Depth:      1,
+		RefSpecs:   []config.RefSpec{"refs/heads/master:refs/heads/master"},
+	}
+	err = repo.Fetch(fetchOptions)
+	if err != nil && err != git.NoErrAlreadyUpToDate {
+		return "", fmt.Errorf("failed to fetch the repository: %v", err)
+	}
+
+	// Get the reference to the fetched commit
+	ref, err := repo.Reference(plumbing.ReferenceName("refs/heads/master"), true)
+	if err != nil {
+		return "", fmt.Errorf("failed to get reference: %v", err)
+	}
+
+	return ref.Hash().String(), nil
+}
 
 func main() {
-	var rootCmd = &cobra.Command{Use: "app"}
+	var rootCmd = &cobra.Command{
+		Use:   "sync",
+		Short: "sync repos",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 0 {
+				reg, err := loadRegistry()
+				if err != nil {
+					fmt.Printf("failed to load registry")
+					os.Exit(1)
+				}
+
+				for url, commitHash := range reg.Repos {
+					dst, err := cloneRepo(commitHash, url)
+					if err != nil {
+						log.Err(err).Str("dir", dst).Msg("Failed to clone repository")
+					}
+				}
+
+			}
+		},
+	}
 
 	var versionCmd = &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("0.1.0")
+			fmt.Println(version)
 		},
 	}
 
 	var registryCmd = &cobra.Command{
-		Use:   "registry",
+		Use:     "registry",
 		Aliases: []string{"reg"},
-		Short: "Manage registry entries",
+		Short:   "Manage registry entries",
 	}
 
 	var listCmd = &cobra.Command{
@@ -118,17 +140,39 @@ func main() {
 				log.Fatal().Err(err).Msg("Failed to load registry")
 			}
 
-			for url, guid := range reg.Entries {
-				fmt.Printf("%s -> %s\n", aurora.Green(guid), aurora.Blue(url))
+			for url, commitHash := range reg.Repos {
+				fmt.Printf("%s -> %s\n", aurora.Green(commitHash), aurora.Blue(url))
 			}
 		},
 	}
 
-	registryCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(versionCmd, registryCmd)
+	var addCmd = &cobra.Command{
+		Use:   "add [url]",
+		Short: "Add URL to the registry",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			url := args[0]
+			err := addToRegistry(url)
+			if err != nil {
+				fmt.Printf("Failed to add URL to the registry: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("URL %s added to the registry\n", url)
+		},
+	}
+
+	var initCmd = &cobra.Command{
+		Use:   "init",
+		Short: "Initialize registry file",
+		Run: func(cmd *cobra.Command, args []string) {
+			initRegistry()
+		},
+	}
+
+	registryCmd.AddCommand(addCmd, listCmd)
+	rootCmd.AddCommand(versionCmd, initCmd, registryCmd)
 	rootCmd.Execute()
 }
-	
 
 // repoURL := "https://github.com/cyber-nic/tr4ck"
 // cloneRepo(repoURL)

@@ -41,4 +41,10 @@ How to get in touch with the Tr4ck support team or community.
 ```
 # list contents of the local registry
 make run ARGS="reg ls"
+
+# init the registry
+make run ARGS="init"
+
+# add a URL to the registry
+make run ARGS="reg add https://github.com/cyber-nic/tr4ck"
 ```
