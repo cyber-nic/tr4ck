@@ -2,59 +2,133 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
-	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5"
 	"github.com/google/uuid"
+	"github.com/logrusorgru/aurora/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"github.com/spf13/cobra"
 )
+	
+var registryFilePath string
 
-// cloneRepo clones a git repository and uses the HEAD commit hash for the directory name.
+type Registry struct {
+	Entries map[string]string
+}
+
+func init() {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to get home directory")
+	}
+
+	registryFilePath = filepath.Join(homeDir, ".tr4ck_registry.json")
+}
+
+
 func cloneRepo(repoURL string) {
-	// Generate a temporary directory for initial clone
 	tmpDir := filepath.Join(os.TempDir(), "tr4ck", "archives", uuid.New().String())
 
-	// Clone the repository
 	repo, err := git.PlainClone(tmpDir, false, &git.CloneOptions{
 		URL: repoURL,
 	})
 	if err != nil {
-		log.Fatalf("Failed to clone the repository: %s", err)
+		log.Error().Err(err).Msg("Failed to clone the repository")
+		return
 	}
 
-	// Get the HEAD commit hash
 	ref, err := repo.Head()
 	if err != nil {
-		log.Fatalf("Failed to get HEAD reference: %s", err)
+		log.Error().Err(err).Msg("Failed to get HEAD reference")
+		return
 	}
 	commit, err := repo.CommitObject(ref.Hash())
 	if err != nil {
-		log.Fatalf("Failed to get commit object: %s", err)
+		log.Error().Err(err).Msg("Failed to get commit object")
+		return
 	}
 	commitHash := commit.Hash.String()
 
-	// Define the final destination directory path
 	destDir := filepath.Join(os.TempDir(), "tr4ck", "archives", commitHash)
+	log.Info().Str("src", repoURL).Str("tmp", tmpDir).Str("dst", destDir).Msg(aurora.Green("Cloning").String())
 
-	// Check if the destination directory already exists
 	if _, err := os.Stat(destDir); !os.IsNotExist(err) {
-		log.Fatalf("Destination directory %s already exists", destDir)
+		log.Info().Str("dir", destDir).Msg("Directory already exists, performing re-sync")
+		repo, err = git.PlainOpen(destDir)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to open existing repository")
+			return
+		}
+		w, err := repo.Worktree()
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to get worktree")
+			return
+		}
+		err = w.Pull(&git.PullOptions{RemoteName: "origin"})
+		if err != nil && err != git.NoErrAlreadyUpToDate {
+			log.Error().Err(err).Msg("Failed to pull updates")
+			return
+		}
+		log.Info().Msg("Repository re-synced successfully")
+	} else {
+		err = os.Rename(tmpDir, destDir)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to rename directory")
+			return
+		}
+		log.Info().Str("dir", destDir).Msg("Repository cloned successfully")
 	}
 
-	// Rename the temporary directory to the final destination
-	err = os.Rename(tmpDir, destDir)
+	err = updateRegistry(repoURL, commitHash)
 	if err != nil {
-		log.Fatalf("Failed to rename directory: %s", err)
+		log.Error().Err(err).Msg("Failed to update registry")
 	}
-
-	fmt.Printf("Repository cloned to %s\n", destDir)
 }
+
 
 func main() {
-	// Example repository URL
-	repoURL := "https://github.com/cyber-nic/tr4ck"
+	var rootCmd = &cobra.Command{Use: "app"}
 
-	// Clone the repository
-	cloneRepo(repoURL)
+	var versionCmd = &cobra.Command{
+		Use:   "version",
+		Short: "Print the version number",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("0.1.0")
+		},
+	}
+
+	var registryCmd = &cobra.Command{
+		Use:   "registry",
+		Aliases: []string{"reg"},
+		Short: "Manage registry entries",
+	}
+
+	var listCmd = &cobra.Command{
+		Use:   "ls",
+		Short: "List the registry entries",
+		Run: func(cmd *cobra.Command, args []string) {
+			reg, err := loadRegistry()
+			if err != nil {
+				log.Fatal().Err(err).Msg("Failed to load registry")
+			}
+
+			for url, guid := range reg.Entries {
+				fmt.Printf("%s -> %s\n", aurora.Green(guid), aurora.Blue(url))
+			}
+		},
+	}
+
+	registryCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(versionCmd, registryCmd)
+	rootCmd.Execute()
 }
+	
+
+// repoURL := "https://github.com/cyber-nic/tr4ck"
+// cloneRepo(repoURL)

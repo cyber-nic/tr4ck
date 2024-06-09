@@ -35,3 +35,10 @@ Information about the project's licensing.
 # Contact
 
 How to get in touch with the Tr4ck support team or community.
+
+# Baisc
+
+```
+# list contents of the local registry
+make run ARGS="reg ls"
+```
