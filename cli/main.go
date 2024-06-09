@@ -35,27 +35,87 @@ func init() {
 	registryFilePath = filepath.Join(homeDir, ".tr4ck_registry.json")
 }
 
+// cloneRepo clones a repository at a specific commit hash or syncs it to the latest state if it already exists.
 func cloneRepo(commitHash, repoURL string) (string, error) {
 	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", commitHash)
 	log.Debug().Str("src", repoURL).Str("dst", dst).Msg(aurora.BrightYellow(repoURL).String())
 
+	// Check if the destination directory already exists
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		// If the repository exists, open it and pull the latest changes
 		repo, err := git.PlainOpen(dst)
 		if err != nil {
-			return commitHash, fmt.Errorf("failed to open existing repository: %w", err)
+			return "", fmt.Errorf("failed to open existing repository: %w", err)
 		}
+
 		w, err := repo.Worktree()
 		if err != nil {
-			return commitHash, fmt.Errorf("failed to get worktree: %w", err)
+			return "", fmt.Errorf("failed to get worktree: %w", err)
 		}
+
 		err = w.Pull(&git.PullOptions{RemoteName: "origin"})
 		if err != nil && err != git.NoErrAlreadyUpToDate {
-			return commitHash, fmt.Errorf("failed to pull updates: %w", err)
+			return "", fmt.Errorf("failed to pull updates: %w", err)
 		}
+
+		// Checkout the specific commit
+		hash := plumbing.NewHash(commitHash)
+		err = w.Checkout(&git.CheckoutOptions{
+			Hash: hash,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to checkout commit: %w", err)
+		}
+
+		return dst, nil
+	}
+
+	// If the repository does not exist, clone it
+	repo, err := git.PlainClone(dst, false, &git.CloneOptions{
+		Progress: 	  os.Stdout,
+		URL:          repoURL,
+		SingleBranch: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to clone repository: %w", err)
+	}
+
+	// Checkout the specific commit
+	w, err := repo.Worktree()
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	hash := plumbing.NewHash(commitHash)
+	err = w.Checkout(&git.CheckoutOptions{
+		Hash: hash,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to checkout commit: %w", err)
 	}
 
 	return dst, nil
 }
+
+func printLatestCommit(dst string) (string, error) {
+	repo, err := git.PlainOpen(dst)
+	if err != nil {
+		return "", fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	ref, err := repo.Head()
+	if err != nil {
+		return "", fmt.Errorf("failed to get HEAD reference: %w", err)
+	}
+
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return "", fmt.Errorf("failed to get latest commit: %w", err)
+	}
+
+	return commit.Hash.String(), nil
+}
+
 
 func getRepoGUIDFromFirstCommit(repoURL string) (string, error) {
 	// Initialize a new in-memory repository
@@ -78,21 +138,54 @@ func getRepoGUIDFromFirstCommit(repoURL string) (string, error) {
 	fetchOptions := &git.FetchOptions{
 		RemoteName: "origin",
 		Depth:      1,
-		RefSpecs:   []config.RefSpec{"refs/heads/master:refs/heads/master"},
+		RefSpecs:   []config.RefSpec{"refs/heads/*:refs/heads/*"},
 	}
 	err = repo.Fetch(fetchOptions)
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return "", fmt.Errorf("failed to fetch the repository: %v", err)
 	}
-
-	// Get the reference to the fetched commit
-	ref, err := repo.Reference(plumbing.ReferenceName("refs/heads/master"), true)
+	
+	ref, err := findDefaultRef(repo)
 	if err != nil {
-		return "", fmt.Errorf("failed to get reference: %v", err)
+		return "", fmt.Errorf("failed to find default branch: %v", err)
 	}
 
 	return ref.Hash().String(), nil
 }
+
+func findDefaultRef(repo *git.Repository) (*plumbing.Reference, error) {
+	// Get the reference to the fetched commit
+	ref, err := repo.Reference(plumbing.ReferenceName("refs/heads/main"), true)
+	if err == nil {
+		return ref, nil
+	}
+
+	ref, err = repo.Reference(plumbing.ReferenceName("refs/heads/master"), true)
+	if err == nil {
+		return ref, nil
+	}
+
+	// tr4ck: improve default branch detection algorithm
+
+	return nil, fmt.Errorf("failed to find default branch")
+}
+
+// func listRefs(repo *git.Repository	) error {
+// 	refs, err := repo.References()
+// 	if err != nil {
+// 		return fmt.Errorf("failed to get references: %w", err)
+// 	}
+
+// 	err = refs.ForEach(func(ref *plumbing.Reference) error {
+// 		fmt.Println(ref.Name(), ref.Hash())
+// 		return nil
+// 	})
+// 	if err != nil {
+// 		return fmt.Errorf("failed to iterate references: %w", err)
+// 	}
+
+// 	return nil
+// }
 
 func main() {
 	var rootCmd = &cobra.Command{
@@ -111,6 +204,15 @@ func main() {
 					if err != nil {
 						log.Err(err).Str("dir", dst).Msg("Failed to clone repository")
 					}
+
+					// print latest commit
+					lastestCommitHash, err := printLatestCommit(dst); 
+					if err != nil {
+						log.Err(err).Msg("Failed to print latest commit")
+					}
+
+					fmt.Printf("Latest commit hash: %s\n", lastestCommitHash)
+
 				}
 
 			}

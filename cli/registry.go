@@ -5,6 +5,8 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+
+	"github.com/rs/zerolog/log"
 )
 
 func loadRegistry() (*Registry, error) {
@@ -76,6 +78,8 @@ func updateRegistry(url, guid string) error {
 }
 
 func addToRegistry(url string) error {
+	log.Debug().Msgf("Adding %s", url)
+
 	// Open the registry file in read-write mode
 	file, err := os.OpenFile(registryFilePath, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
@@ -98,6 +102,8 @@ func addToRegistry(url string) error {
 	if err != nil {
 		return fmt.Errorf("failed to clone repository: %v", err)
 	}
+
+	log.Debug().Str("url", url).Str("commitHash", commitHash).Msg("Adding repository to registry")
 
 	err = updateRegistry(url, commitHash)
 	if err != nil {
