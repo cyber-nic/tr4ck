@@ -32,9 +32,9 @@ func init() {
 }
 
 // cloneRepo clones a repository at a specific commit hash or syncs it to the latest state if it already exists.
-func cloneRepo(commitHash, repoURI string) (string, error) {
-	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", commitHash)
-	log.Debug().Str("src", repoURI).Str("dst", dst).Msg(aurora.BrightYellow(repoURI).String())
+func cloneRepo(record *RegistryRecord) (string, error) {
+	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", record.RootHash)
+	log.Debug().Str("dst", dst).Msg(aurora.BrightYellow(record.URI).String())
 
 	// Check if the destination directory already exists
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
@@ -55,7 +55,7 @@ func cloneRepo(commitHash, repoURI string) (string, error) {
 		}
 
 		// Checkout the specific commit
-		hash := plumbing.NewHash(commitHash)
+		hash := plumbing.NewHash(record.RootHash)
 		err = w.Checkout(&git.CheckoutOptions{
 			Hash: hash,
 		})
@@ -68,8 +68,8 @@ func cloneRepo(commitHash, repoURI string) (string, error) {
 
 	// If the repository does not exist, clone it
 	repo, err := git.PlainClone(dst, false, &git.CloneOptions{
-		Progress:     os.Stdout,
-		URL:          repoURI,
+		// Progress:     os.Stdout,
+		URL:          record.URI,
 		SingleBranch: true,
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func cloneRepo(commitHash, repoURI string) (string, error) {
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	hash := plumbing.NewHash(commitHash)
+	hash := plumbing.NewHash(record.RootHash)
 	err = w.Checkout(&git.CheckoutOptions{
 		Hash: hash,
 	})
@@ -93,7 +93,7 @@ func cloneRepo(commitHash, repoURI string) (string, error) {
 	return dst, nil
 }
 
-func printLatestCommit(dst string) (string, error) {
+func getLatestCommit(dst string) (string, error) {
 	repo, err := git.PlainOpen(dst)
 	if err != nil {
 		return "", fmt.Errorf("failed to open repository: %w", err)
@@ -112,7 +112,7 @@ func printLatestCommit(dst string) (string, error) {
 	return commit.Hash.String(), nil
 }
 
-func getRepoGUIDFromFirstCommit(repoURI string) (string, error) {
+func getRootHashFromFirstCommit(repoURI string) (string, error) {
 	// Initialize a new in-memory repository
 	storer := memory.NewStorage()
 	repo, err := git.Init(storer, nil)
@@ -195,21 +195,30 @@ func main() {
 				}
 
 				for _, record := range *registry {
-					dst, err := cloneRepo(record.RootHash, record.URI)
+					dst, err := cloneRepo(&record)
 					if err != nil {
 						log.Err(err).Str("dir", dst).Msg("Failed to clone repository")
 					}
 
 					// print latest commit
-					lastestHash, err := printLatestCommit(dst)
+					lastestHash, err := getLatestCommit(dst)
 					if err != nil {
 						log.Err(err).Msg("Failed to print latest commit")
 					}
 
-					fmt.Printf("Latest commit hash: %s\n", lastestHash)
+					if record.LastestHash != lastestHash {
+						fmt.Printf("Out of sync: %s != %s\n", lastestHash, record.LastestHash)
+					}
+					// perform complete repo scan
 
+
+					// update registry
+					record.LastestHash = lastestHash
+					if err = updateRegistry(record); err != nil {
+						log.Err(err).Msg("Failed to update registry")
+					}
+					
 				}
-
 			}
 		},
 	}

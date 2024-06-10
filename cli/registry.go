@@ -28,7 +28,6 @@ func loadRegistry() (*[]RegistryRecord, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		log.Trace().Msg(line)
 		parts := strings.Fields(line)
 
 		// invalid line
@@ -101,16 +100,48 @@ func appendToRegistry(record *RegistryRecord) error {
 	return writer.Flush()
 }
 
-// // updateRegistry updates the registry with the given URI and GUID
-// func updateRegistry(uri, guid string) error {
-// 	reg, err := loadRegistry()
-// 	if err != nil {
-// 		return err
-// 	}
+// updateRegistry updates a registry record for a given URI
+func updateRegistry(rec RegistryRecord) error {
+	records, err := loadRegistry()
+	if err != nil {
+		return fmt.Errorf("failed to load registry: %w", err)
+	}
 
-// 	reg.Repos[uri] = guid
-// 	return saveRegistry(reg)
-// }
+	updated := false
+	for i, record := range *records {
+		if record.URI == rec.URI {
+			(*records)[i] = RegistryRecord{
+				RootHash:    rec.RootHash,
+				LastestHash: rec.LastestHash,
+				URI:         rec.URI,
+			}
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		return fmt.Errorf("URI %s not found in the registry", rec.URI)
+	}
+
+	file, err := os.OpenFile(registryFilePath, os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open registry file for writing: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	for _, record := range *records {
+		_, err = writer.WriteString(fmt.Sprintf("%s    %s    %s\n", record.RootHash, record.LastestHash, record.URI))
+		if err != nil {
+			return fmt.Errorf("failed to write to registry file: %w", err)
+		}
+	}
+	return writer.Flush()
+}
+
+
+
 
 // addToRegistry adds the given URI to the registry
 func addToRegistry(uri string) error {
@@ -133,7 +164,7 @@ func addToRegistry(uri string) error {
 		return err
 	}
 
-	commitHash, err := getRepoGUIDFromFirstCommit(uri)
+	commitHash, err := getRootHashFromFirstCommit(uri)
 	if err != nil {
 		return fmt.Errorf("failed to clone repository: %v", err)
 	}
