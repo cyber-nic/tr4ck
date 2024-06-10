@@ -50,4 +50,10 @@ make run ARGS="reg add https://github.com/cyber-nic/tr4ck"
 
 # add a local path to the registry
 make run ARGS="reg add /Users/ndelorme/code/saga/saga"
+
+# scan a repo as-is
+make run ARGS="scan https://github.com/cyber-nic/tr4ck"
+
+# sync registered repos and scan since latest commit for tr4cks
+make run ARGS=""
 ```

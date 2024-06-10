@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,17 @@ import (
 const version = "0.1.0"
 
 var registryFilePath string
-var markers = []string{"tr@ck", "todo"}
+var markers = []string{"tr@ck", "todo", "fixme"}
+
+// Extensions to ignore
+var ignoredExtensions = map[string]struct{}{
+	".json": {},
+	".yaml": {},
+	".yml":  {},
+	".sum":  {},
+	".mod":  {},
+	".html": {},
+}
 
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
@@ -162,11 +173,7 @@ func listChangedFilesSinceCommit(repo *git.Repository, oldCommitHash, newCommitH
 		removed = append(removed, file)
 	}
 
-	// filter out files. remove *.json, *.yaml, *.yml, *.sum, *.mod
-	filteredChanged := filterFiles(changed)
-	filteredRemoved := filterFiles(removed)
-
-	return filteredChanged, filteredRemoved, nil
+	return changed, removed, nil
 }
 
 func getRootHashFromFirstCommit(repoURI string) (string, error) {
@@ -222,19 +229,6 @@ func findDefaultRef(repo *git.Repository) (*plumbing.Reference, error) {
 	return nil, fmt.Errorf("failed to find default branch")
 }
 
-// removes file types for which tracking is disabled
-func filterFiles(files []string) []string {
-	var filtered []string
-	for _, file := range files {
-		ext := filepath.Ext(file)
-		if ext == ".json" || ext == ".yaml" || ext == ".yml" || ext == ".sum" || ext == ".mod" {
-			continue
-		}
-		filtered = append(filtered, file)
-	}
-	return filtered
-}
-
 // containsMarker checks if a file contains any of the specified markers
 func containsMarker(filePath string, markers []string) (bool, string, error) {
 	file, err := os.Open(filePath)
@@ -243,20 +237,66 @@ func containsMarker(filePath string, markers []string) (bool, string, error) {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return false, "", fmt.Errorf("error reading file %s: %w", filePath, err)
+		}
 		for _, marker := range markers {
 			if strings.Contains(line, marker) {
 				return true, marker, nil
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return false, "", fmt.Errorf("error reading file %s: %w", filePath, err)
-	}
 
 	return false, "", nil
+}
+
+// listFilesWithMarkers lists all files in the repository that contain any markers
+func listFilesWithMarkers(repo *git.Repository, markers []string) ([]string, error) {
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	// Collect all files in the repository
+	var filesWithMarkers []string
+	root := worktree.Filesystem.Root()
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			// filter
+			ext := filepath.Ext(path)
+			if _, ignore := ignoredExtensions[ext]; ignore {
+				return nil
+			}
+
+			hit, mark, err := containsMarker(path, markers)
+			if err != nil {
+				return err
+			}
+			if hit {
+				file, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				log.Trace().Str("file", file).Str("marker", mark).Msg(aurora.BrightGreen("tr4ck").String())
+				filesWithMarkers = append(filesWithMarkers, file)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error walking the file tree: %w", err)
+	}
+
+	return filesWithMarkers, nil
 }
 
 // listFilesWithMarkersSinceCommit lists files that contain any markers and have changed since the specified commit
@@ -279,7 +319,7 @@ func listFilesWithMarkersSinceCommit(repo *git.Repository, firstHash, latestHash
 			return nil, nil, err
 		}
 		if hit {
-			log.Trace().Str("file",file).Str("marker", mark).Msg(aurora.BrightGreen("tr4ck").String())
+			log.Trace().Str("file", file).Str("marker", mark).Msg(aurora.BrightGreen("tr4ck").String())
 			filesWithMarkers = append(filesWithMarkers, file)
 		}
 	}
@@ -306,13 +346,13 @@ func main() {
 					}
 
 					// latest commit
-					lastestHash, err := getLatestCommit(repo)
+					latestHash, err := getLatestCommit(repo)
 					if err != nil {
 						log.Err(err).Msg("Failed to get latest commit")
 					}
 
-					if record.LastestHash == lastestHash {
-						log.Debug().Str("uri", record.URI).Str("latest", lastestHash).Msg(aurora.BrightYellow("Skip").String())
+					if record.LastestHash == latestHash {
+						log.Debug().Str("uri", record.URI).Str("latest", latestHash).Msg(aurora.BrightYellow("Skip").String())
 						// no latest commit, skip
 						continue
 					}
@@ -324,16 +364,16 @@ func main() {
 					}
 
 					// list commits since last processed commit
-					changed, removed, err := listFilesWithMarkersSinceCommit(repo, firstHash, lastestHash, markers)
+					changed, removed, err := listFilesWithMarkersSinceCommit(repo, firstHash, latestHash, markers)
 					if err != nil {
 						log.Err(err).Msg("Failed to list files in latest commit")
 						continue
 					}
 
 					if changed == nil && removed == nil {
-						log.Debug().Str("uri", record.URI).Str("latest", lastestHash).Msg(aurora.BrightYellow("Skip").String())
+						log.Debug().Str("uri", record.URI).Str("latest", latestHash).Msg(aurora.BrightYellow("Skip").String())
 						// update registry
-						record.LastestHash = lastestHash
+						record.LastestHash = latestHash
 						if err = updateRegistry(record); err != nil {
 							log.Err(err).Msg("Failed to update registry")
 						}
@@ -342,16 +382,60 @@ func main() {
 						continue
 					}
 
-					log.Debug().Int("changed", len(changed)).Int("removed", len(removed)).Str("uri", record.URI).Str("latest", lastestHash).Str("hash", record.LastestHash).Msg(aurora.BrightYellow("Update").String())
+					log.Debug().Int("changed", len(changed)).Int("removed", len(removed)).Str("uri", record.URI).Str("latest", latestHash).Str("hash", record.LastestHash).Msg(aurora.BrightYellow("Update").String())
 
 					// // update registry
-					// record.LastestHash = lastestHash
+					// record.LastestHash = latestHash
 					// if err = updateRegistry(record); err != nil {
 					// 	log.Err(err).Msg("Failed to update registry")
 					// }
 
 				}
 			}
+		},
+	}
+
+	var scanCmd = &cobra.Command{
+		Use:   "scan",
+		Short: "Scan an entire repository for markers",
+		Run: func(cmd *cobra.Command, args []string) {
+			if len(args) == 0 {
+				fmt.Println("Please provide a repository URI")
+				os.Exit(1)
+			}
+
+			uri := args[0]
+			rootHash, err := getRootHashFromFirstCommit(uri)
+			if err != nil {
+				log.Err(err).Msg("Failed to get root commit hash")
+			}
+
+			repo, err := cloneRepo(&RegistryRecord{
+				RootHash: rootHash,
+				URI:      uri,
+			})
+			if err != nil {
+				log.Err(err).Msg("Failed to clone repository")
+			}
+
+			// get latest hash
+			latestHash, err := getLatestCommit(repo)
+			if err != nil {
+				log.Err(err).Msg("Failed to get latest commit")
+				return
+			}
+
+			changed, err := listFilesWithMarkers(repo, markers)
+			if err != nil {
+				log.Err(err).Msg("Failed to list files with markers")
+			}
+
+			if changed == nil {
+				log.Debug().Str("uri", uri).Str("latest", latestHash).Msg(aurora.BrightYellow("Skip").String())
+				return
+			}
+
+			log.Debug().Int("changed", len(changed)).Str("uri", uri).Str("latest", latestHash).Str("hash", latestHash).Msg(aurora.BrightYellow("Update").String())
 		},
 	}
 
@@ -408,6 +492,6 @@ func main() {
 	}
 
 	registryCmd.AddCommand(addCmd, listCmd)
-	rootCmd.AddCommand(versionCmd, initCmd, registryCmd)
+	rootCmd.AddCommand(versionCmd, initCmd, registryCmd, scanCmd)
 	rootCmd.Execute()
 }
