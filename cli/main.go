@@ -1,15 +1,15 @@
 package main
 
 import (
-	"errors"
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/rs/zerolog"
@@ -20,6 +20,7 @@ import (
 const version = "0.1.0"
 
 var registryFilePath string
+var markers = []string{"tr@ck", "todo"}
 
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
@@ -36,7 +37,6 @@ func init() {
 // cloneRepo clones a repository at a specific commit hash or syncs it to the latest state if it already exists.
 func cloneRepo(record *RegistryRecord) (*git.Repository, error) {
 	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", record.RootHash)
-	log.Trace().Str("dst", dst).Msg(record.URI)
 
 	// Check if the destination directory already exists
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
@@ -65,7 +65,6 @@ func cloneRepo(record *RegistryRecord) (*git.Repository, error) {
 			return nil, fmt.Errorf("failed to checkout commit: %w", err)
 		}
 
-	
 		return repo, nil
 	}
 
@@ -110,79 +109,65 @@ func getLatestCommit(repo *git.Repository) (string, error) {
 	return commit.Hash.String(), nil
 }
 
-var errStopIteration = errors.New("stop iteration")
-
-
-// listChangedFilesSinceCommit lists all files that have changed from the latest commit back to a specified commit
-func listChangedFilesSinceCommit(repo *git.Repository, sinceCommitHash string) ([]string, error) {
-	// Get the commit object for the specified commit hash
-	sinceCommit, err := repo.CommitObject(plumbing.NewHash(sinceCommitHash))
+// listChangedFilesSinceCommit lists all files that have changed between two commits
+func listChangedFilesSinceCommit(repo *git.Repository, oldCommitHash, newCommitHash string) ([]string, []string, error) {
+	// Get the commit objects for the specified commit hashes
+	oldCommit, err := repo.CommitObject(plumbing.NewHash(oldCommitHash))
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object for hash %s: %w", sinceCommitHash, err)
+		return nil, nil, fmt.Errorf("failed to get commit object for old hash %s: %w", oldCommitHash, err)
 	}
 
-	// Collect all changed files
+	newCommit, err := repo.CommitObject(plumbing.NewHash(newCommitHash))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get commit object for new hash %s: %w", newCommitHash, err)
+	}
+
+	// Get the patch between the two commits
+	patch, err := oldCommit.Patch(newCommit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate patch: %w", err)
+	}
+
+	// Extract the changed and removed files from the patch
 	changedFiles := make(map[string]struct{})
+	removedFiles := make(map[string]struct{})
 
-	// Iterate through the commit history starting from HEAD
-	ref, err := repo.Head()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get HEAD reference: %w", err)
+	for _, filePatch := range patch.FilePatches() {
+		from, to := filePatch.Files()
+
+		if from != nil && to != nil && from.Path() != to.Path() {
+			// This is a rename operation
+			delete(changedFiles, from.Path())
+			changedFiles[to.Path()] = struct{}{}
+			log.Trace().Str("from", from.Path()).Str("to", to.Path()).Msg("rename")
+		} else if to != nil {
+			// This is an addition or modification
+			changedFiles[to.Path()] = struct{}{}
+			log.Trace().Str("to", to.Path()).Msg("add")
+		} else if from != nil {
+			// This is a deletion
+			removedFiles[from.Path()] = struct{}{}
+			log.Trace().Str("from", from.Path()).Msg("delete")
+		}
 	}
 
-	commitIter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit logs: %w", err)
-	}
-
-	err = commitIter.ForEach(func(commit *object.Commit) error {
-		if commit.Hash == sinceCommit.Hash {
-			return errStopIteration
-		}
-
-		// Get the parent commit
-		parentCommit, err := commit.Parents().Next()
-		if err != nil {
-			return fmt.Errorf("failed to get parent commit: %w", err)
-		}
-
-		// Get the patch between the current commit and its parent
-		patch, err := parentCommit.Patch(commit)
-		if err != nil {
-			return fmt.Errorf("failed to generate patch: %w", err)
-		}
-
-		// Extract the changed files from the patch
-		for _, filePatch := range patch.FilePatches() {
-			from, to := filePatch.Files()
-
-			if from != nil && to != nil && from.Path() != to.Path() {
-				// This is a rename operation
-				delete(changedFiles, from.Path())
-				changedFiles[to.Path()] = struct{}{}
-			} else if to != nil {
-				// This is an addition or modification
-				changedFiles[to.Path()] = struct{}{}
-			}
-		}
-
-		return nil
-	})
-	if err != nil && err != errStopIteration {
-		return nil, fmt.Errorf("failed to iterate commits: %w", err)
-	}
-
-	// Convert the map keys to a slice
-	var files []string
+	// Convert the map keys to slices
+	var changed []string
 	for file := range changedFiles {
-		files = append(files, file)
+		changed = append(changed, file)
 	}
 
-	return files, nil
+	var removed []string
+	for file := range removedFiles {
+		removed = append(removed, file)
+	}
+
+	// filter out files. remove *.json, *.yaml, *.yml, *.sum, *.mod
+	filteredChanged := filterFiles(changed)
+	filteredRemoved := filterFiles(removed)
+
+	return filteredChanged, filteredRemoved, nil
 }
-
-
-
 
 func getRootHashFromFirstCommit(repoURI string) (string, error) {
 	// Initialize a new in-memory repository
@@ -250,6 +235,58 @@ func filterFiles(files []string) []string {
 	return filtered
 }
 
+// containsMarker checks if a file contains any of the specified markers
+func containsMarker(filePath string, markers []string) (bool, string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to open file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		for _, marker := range markers {
+			if strings.Contains(line, marker) {
+				return true, marker, nil
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, "", fmt.Errorf("error reading file %s: %w", filePath, err)
+	}
+
+	return false, "", nil
+}
+
+// listFilesWithMarkersSinceCommit lists files that contain any markers and have changed since the specified commit
+func listFilesWithMarkersSinceCommit(repo *git.Repository, firstHash, latestHash string, markers []string) ([]string, []string, error) {
+	changedFiles, removedFiles, err := listChangedFilesSinceCommit(repo, firstHash, latestHash)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	var filesWithMarkers []string
+	for _, file := range changedFiles {
+		absFilePath := filepath.Join(w.Filesystem.Root(), file)
+		hit, mark, err := containsMarker(absFilePath, markers)
+		if err != nil {
+			return nil, nil, err
+		}
+		if hit {
+			log.Trace().Str("file",file).Str("marker", mark).Msg(aurora.BrightGreen("tr4ck").String())
+			filesWithMarkers = append(filesWithMarkers, file)
+		}
+	}
+
+	return filesWithMarkers, removedFiles, nil
+}
+
 func main() {
 	var rootCmd = &cobra.Command{
 		Use:   "sync",
@@ -268,16 +305,10 @@ func main() {
 						log.Err(err).Str("uri", record.URI).Msg("Failed to clone repository")
 					}
 
-					// // get path from repo
-					// repodir, err := repo.Worktree()
-					// // to string
-					// dst := repodir.Filesystem.Root()
-
-
-					// print latest commit
+					// latest commit
 					lastestHash, err := getLatestCommit(repo)
 					if err != nil {
-						log.Err(err).Msg("Failed to print latest commit")
+						log.Err(err).Msg("Failed to get latest commit")
 					}
 
 					if record.LastestHash == lastestHash {
@@ -286,26 +317,32 @@ func main() {
 						continue
 					}
 
-					log.Debug().Str("uri", record.URI).Str("latest", lastestHash).Str("hash", record.LastestHash).Msg(aurora.BrightYellow("Update").String())
-
-					commitHash := record.LastestHash
+					firstHash := record.LastestHash
 					// handle possible empty latest commit hash
-					if commitHash == "" {
-						commitHash = record.RootHash
+					if firstHash == "" {
+						firstHash = record.RootHash
 					}
 
 					// list commits since last processed commit
-					files, err := listChangedFilesSinceCommit(repo, commitHash)
+					changed, removed, err := listFilesWithMarkersSinceCommit(repo, firstHash, lastestHash, markers)
 					if err != nil {
 						log.Err(err).Msg("Failed to list files in latest commit")
 						continue
 					}
 
-					// filter out files. remove *.json, *.yaml, *.yml, *.sum, *.mod
-					files = filterFiles(files)
+					if changed == nil && removed == nil {
+						log.Debug().Str("uri", record.URI).Str("latest", lastestHash).Msg(aurora.BrightYellow("Skip").String())
+						// update registry
+						record.LastestHash = lastestHash
+						if err = updateRegistry(record); err != nil {
+							log.Err(err).Msg("Failed to update registry")
+						}
 
-					PrintStruct(os.Stdout, files)
+						// no changed files, skip
+						continue
+					}
 
+					log.Debug().Int("changed", len(changed)).Int("removed", len(removed)).Str("uri", record.URI).Str("latest", lastestHash).Str("hash", record.LastestHash).Msg(aurora.BrightYellow("Update").String())
 
 					// // update registry
 					// record.LastestHash = lastestHash

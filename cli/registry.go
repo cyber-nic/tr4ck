@@ -140,9 +140,6 @@ func updateRegistry(rec RegistryRecord) error {
 	return writer.Flush()
 }
 
-
-
-
 // addToRegistry adds the given URI to the registry
 func addToRegistry(uri string) error {
 	// Open the registry file in read-write mode
