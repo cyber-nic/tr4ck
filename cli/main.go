@@ -149,13 +149,28 @@ func listChangedFilesSinceCommit(repo *git.Repository, oldCommitHash, newCommitH
 		if from != nil && to != nil && from.Path() != to.Path() {
 			// This is a rename operation
 			delete(changedFiles, from.Path())
-			changedFiles[to.Path()] = struct{}{}
 			log.Trace().Str("from", from.Path()).Str("to", to.Path()).Msg("rename")
+			// filter
+			if _, ignore := ignoredExtensions[filepath.Ext(from.Path())]; ignore {
+				continue
+			}
+
+			changedFiles[to.Path()] = struct{}{}
 		} else if to != nil {
+			// filter
+			if _, ignore := ignoredExtensions[filepath.Ext(from.Path())]; ignore {
+				continue
+			}
+
 			// This is an addition or modification
 			changedFiles[to.Path()] = struct{}{}
 			log.Trace().Str("to", to.Path()).Msg("add")
 		} else if from != nil {
+			// filter
+			if _, ignore := ignoredExtensions[filepath.Ext(from.Path())]; ignore {
+				continue
+			}
+
 			// This is a deletion
 			removedFiles[from.Path()] = struct{}{}
 			log.Trace().Str("from", from.Path()).Msg("delete")
@@ -384,11 +399,11 @@ func main() {
 
 					log.Debug().Int("changed", len(changed)).Int("removed", len(removed)).Str("uri", record.URI).Str("latest", latestHash).Str("hash", record.LastestHash).Msg(aurora.BrightYellow("Update").String())
 
-					// // update registry
-					// record.LastestHash = latestHash
-					// if err = updateRegistry(record); err != nil {
-					// 	log.Err(err).Msg("Failed to update registry")
-					// }
+					// update registry
+					record.LastestHash = latestHash
+					if err = updateRegistry(record); err != nil {
+						log.Err(err).Msg("Failed to update registry")
+					}
 
 				}
 			}
