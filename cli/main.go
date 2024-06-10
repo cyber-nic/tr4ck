@@ -19,10 +19,6 @@ const version = "0.1.0"
 
 var registryFilePath string
 
-type Registry struct {
-	Repos map[string]string
-}
-
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).With().Caller().Logger()
@@ -72,7 +68,7 @@ func cloneRepo(commitHash, repoURI string) (string, error) {
 
 	// If the repository does not exist, clone it
 	repo, err := git.PlainClone(dst, false, &git.CloneOptions{
-		Progress: 	  os.Stdout,
+		Progress:     os.Stdout,
 		URL:          repoURI,
 		SingleBranch: true,
 	})
@@ -116,7 +112,6 @@ func printLatestCommit(dst string) (string, error) {
 	return commit.Hash.String(), nil
 }
 
-
 func getRepoGUIDFromFirstCommit(repoURI string) (string, error) {
 	// Initialize a new in-memory repository
 	storer := memory.NewStorage()
@@ -144,7 +139,7 @@ func getRepoGUIDFromFirstCommit(repoURI string) (string, error) {
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return "", fmt.Errorf("failed to fetch the repository: %v", err)
 	}
-	
+
 	ref, err := findDefaultRef(repo)
 	if err != nil {
 		return "", fmt.Errorf("failed to find default branch: %v", err)
@@ -193,25 +188,25 @@ func main() {
 		Short: "sync repos",
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 {
-				reg, err := loadRegistry()
+				registry, err := loadRegistry()
 				if err != nil {
-					fmt.Printf("failed to load registry")
+					fmt.Printf("failed to load registry\n")
 					os.Exit(1)
 				}
 
-				for uri, commitHash := range reg.Repos {
-					dst, err := cloneRepo(commitHash, uri)
+				for _, record := range *registry {
+					dst, err := cloneRepo(record.RootHash, record.URI)
 					if err != nil {
 						log.Err(err).Str("dir", dst).Msg("Failed to clone repository")
 					}
 
 					// print latest commit
-					lastestCommitHash, err := printLatestCommit(dst); 
+					lastestHash, err := printLatestCommit(dst)
 					if err != nil {
 						log.Err(err).Msg("Failed to print latest commit")
 					}
 
-					fmt.Printf("Latest commit hash: %s\n", lastestCommitHash)
+					fmt.Printf("Latest commit hash: %s\n", lastestHash)
 
 				}
 
@@ -242,8 +237,8 @@ func main() {
 				log.Fatal().Err(err).Msg("Failed to load registry")
 			}
 
-			for uri, commitHash := range reg.Repos {
-				fmt.Printf("%s -> %s\n", aurora.Green(commitHash), aurora.Blue(uri))
+			for _, record := range *reg {
+				fmt.Printf("%s	%s	%s\n", aurora.Green(record.RootHash), record.LastestHash, aurora.Blue(record.URI))
 			}
 		},
 	}

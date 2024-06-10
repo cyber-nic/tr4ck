@@ -2,84 +2,118 @@ package main
 
 import (
 	"bufio"
-	"encoding/csv"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 )
 
-func loadRegistry() (*Registry, error) {
-	reg := &Registry{Repos: make(map[string]string)}
+// RegistryRecord represents a record in the registry file. It contains the root hash, the latest hash, and the URI of the repository being tracked.
+type RegistryRecord struct {
+	RootHash    string
+	LastestHash string
+	URI         string
+	// tr@ck: also track the branch
+}
 
-	// read registry file
-	if _, err := os.Stat(registryFilePath); os.IsNotExist(err) {
-		fmt.Printf("Registry file %s does not exist\n", registryFilePath)
-		os.Exit(1)
-	} else if err != nil {
-		fmt.Printf("Error checking registry file %s: %v\n", registryFilePath, err)
-		os.Exit(1)
-	}
-
+func loadRegistry() (*[]RegistryRecord, error) {
 	file, err := os.Open(registryFilePath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return reg, nil
-		}
-		return nil, err
+		return nil, fmt.Errorf("failed to open registry file: %w", err)
 	}
 	defer file.Close()
 
-	reader := csv.NewReader(file)
-	reader.Comma = '\t'
-	records, err := reader.ReadAll()
-	if err != nil {
-		return nil, err
-	}
+	var records []RegistryRecord
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Trace().Msg(line)
+		parts := strings.Fields(line)
 
-	for _, record := range records {
-		if len(record) == 2 {
-			reg.Repos[record[1]] = record[0]
+		// invalid line
+		if len(parts) > 3 {
+			return nil, fmt.Errorf("invalid registry entry: %s", line)
 		}
+
+		// uri only
+		if len(parts) == 1 {
+			// tr@ck: validate git uri format. can be url or path
+			uri := strings.Trim(line, " ")
+			records = append(records, RegistryRecord{URI: uri})
+			continue
+		}
+
+		// uri and root hash
+		if len(parts) == 2 {
+			// tr@ck: validate git uri format. can be url or path
+			// tr@ck: validate commit hash format
+			commitHash := parts[0]
+			uri := strings.Join(parts[1:], " ") // Join the remaining parts to form the URL
+			records = append(records, RegistryRecord{URI: uri, RootHash: commitHash})
+			continue
+		}
+
+		// complete record
+		commitHash := parts[0]
+		lastProcessedCommit := parts[1]
+		uri := strings.Join(parts[2:], " ") // Join the remaining parts to form the URL
+		record := RegistryRecord{
+			RootHash:    commitHash,
+			LastestHash: lastProcessedCommit,
+			URI:         uri,
+		}
+		records = append(records, record)
 	}
 
-	return reg, nil
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading registry file: %w", err)
+	}
+
+	// PrintStruct(os.Stdout, records)
+
+	return &records, nil
 }
 
-func saveRegistry(reg *Registry) error {
-	file, err := os.Create(registryFilePath)
+func appendToRegistry(record *RegistryRecord) error {
+	file, err := os.OpenFile(registryFilePath, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open registry file: %w", err)
 	}
 	defer file.Close()
 
-	writer := csv.NewWriter(file)
-	writer.Comma = '\t'
-	defer writer.Flush()
-
-	for uri, guid := range reg.Repos {
-		err := writer.Write([]string{guid, uri})
-		if err != nil {
-			return err
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, record.URI) {
+			return fmt.Errorf("URL %s already exists in the registry", record.URI)
 		}
 	}
-
-	return nil
-}
-
-func updateRegistry(uri, guid string) error {
-	reg, err := loadRegistry()
-	if err != nil {
-		return err
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading registry file: %w", err)
 	}
 
-	reg.Repos[uri] = guid
-	return saveRegistry(reg)
+	writer := bufio.NewWriter(file)
+	_, err = writer.WriteString(fmt.Sprintf("%s    %s    %s\n", record.RootHash, record.LastestHash, record.URI))
+	if err != nil {
+		return fmt.Errorf("failed to write to registry file: %w", err)
+	}
+	return writer.Flush()
 }
 
+// // updateRegistry updates the registry with the given URI and GUID
+// func updateRegistry(uri, guid string) error {
+// 	reg, err := loadRegistry()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	reg.Repos[uri] = guid
+// 	return saveRegistry(reg)
+// }
+
+// addToRegistry adds the given URI to the registry
 func addToRegistry(uri string) error {
-	log.Debug().Msgf("Adding %s", uri)
-
 	// Open the registry file in read-write mode
 	file, err := os.OpenFile(registryFilePath, os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
@@ -90,7 +124,8 @@ func addToRegistry(uri string) error {
 	// Check if the URI already exists
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if scanner.Text() == uri {
+		line := scanner.Text()
+		if strings.Contains(line, uri) {
 			return fmt.Errorf("URI %s already exists in the registry", uri)
 		}
 	}
@@ -103,9 +138,13 @@ func addToRegistry(uri string) error {
 		return fmt.Errorf("failed to clone repository: %v", err)
 	}
 
-	log.Debug().Str("uri", uri).Str("commitHash", commitHash).Msg("Adding repository to registry")
+	log.Debug().Str("uri", uri).Str("commitHash", commitHash).Msg("Adding")
 
-	err = updateRegistry(uri, commitHash)
+	err = appendToRegistry(&RegistryRecord{
+		RootHash:    commitHash,
+		LastestHash: commitHash,
+		URI:         uri,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to update registry: %v", err)
 	}

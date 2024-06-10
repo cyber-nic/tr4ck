@@ -47,4 +47,7 @@ make run ARGS="init"
 
 # add a URL to the registry
 make run ARGS="reg add https://github.com/cyber-nic/tr4ck"
+
+# add a local path to the registry
+make run ARGS="reg add /Users/ndelorme/code/saga/saga"
 ```
