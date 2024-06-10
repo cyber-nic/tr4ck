@@ -32,13 +32,13 @@ func init() {
 		log.Fatal().Err(err).Msg("Failed to get home directory")
 	}
 
-	registryFilePath = filepath.Join(homeDir, ".tr4ck_registry.json")
+	registryFilePath = filepath.Join(homeDir, ".tr4ck.registry")
 }
 
 // cloneRepo clones a repository at a specific commit hash or syncs it to the latest state if it already exists.
-func cloneRepo(commitHash, repoURL string) (string, error) {
+func cloneRepo(commitHash, repoURI string) (string, error) {
 	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", commitHash)
-	log.Debug().Str("src", repoURL).Str("dst", dst).Msg(aurora.BrightYellow(repoURL).String())
+	log.Debug().Str("src", repoURI).Str("dst", dst).Msg(aurora.BrightYellow(repoURI).String())
 
 	// Check if the destination directory already exists
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
@@ -73,7 +73,7 @@ func cloneRepo(commitHash, repoURL string) (string, error) {
 	// If the repository does not exist, clone it
 	repo, err := git.PlainClone(dst, false, &git.CloneOptions{
 		Progress: 	  os.Stdout,
-		URL:          repoURL,
+		URL:          repoURI,
 		SingleBranch: true,
 	})
 	if err != nil {
@@ -117,7 +117,7 @@ func printLatestCommit(dst string) (string, error) {
 }
 
 
-func getRepoGUIDFromFirstCommit(repoURL string) (string, error) {
+func getRepoGUIDFromFirstCommit(repoURI string) (string, error) {
 	// Initialize a new in-memory repository
 	storer := memory.NewStorage()
 	repo, err := git.Init(storer, nil)
@@ -125,10 +125,10 @@ func getRepoGUIDFromFirstCommit(repoURL string) (string, error) {
 		return "", fmt.Errorf("failed to initialize repository: %v", err)
 	}
 
-	// Add a new remote with the given URL
+	// Add a new remote with the given URI
 	_, err = repo.CreateRemote(&config.RemoteConfig{
 		Name: "origin",
-		URLs: []string{repoURL},
+		URLs: []string{repoURI},
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create remote: %v", err)
@@ -165,7 +165,7 @@ func findDefaultRef(repo *git.Repository) (*plumbing.Reference, error) {
 		return ref, nil
 	}
 
-	// tr4ck: improve default branch detection algorithm
+	// tr@ck: improve default branch detection algorithm
 
 	return nil, fmt.Errorf("failed to find default branch")
 }
@@ -199,8 +199,8 @@ func main() {
 					os.Exit(1)
 				}
 
-				for url, commitHash := range reg.Repos {
-					dst, err := cloneRepo(commitHash, url)
+				for uri, commitHash := range reg.Repos {
+					dst, err := cloneRepo(commitHash, uri)
 					if err != nil {
 						log.Err(err).Str("dir", dst).Msg("Failed to clone repository")
 					}
@@ -242,24 +242,24 @@ func main() {
 				log.Fatal().Err(err).Msg("Failed to load registry")
 			}
 
-			for url, commitHash := range reg.Repos {
-				fmt.Printf("%s -> %s\n", aurora.Green(commitHash), aurora.Blue(url))
+			for uri, commitHash := range reg.Repos {
+				fmt.Printf("%s -> %s\n", aurora.Green(commitHash), aurora.Blue(uri))
 			}
 		},
 	}
 
 	var addCmd = &cobra.Command{
-		Use:   "add [url]",
-		Short: "Add URL to the registry",
+		Use:   "add [uri]",
+		Short: "Add URI to the registry",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			url := args[0]
-			err := addToRegistry(url)
+			uri := args[0]
+			err := addToRegistry(uri)
 			if err != nil {
-				fmt.Printf("Failed to add URL to the registry: %v\n", err)
+				fmt.Printf("Failed to add URI to the registry: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Printf("URL %s added to the registry\n", url)
+			fmt.Printf("URI %s added to the registry\n", uri)
 		},
 	}
 
@@ -275,6 +275,3 @@ func main() {
 	rootCmd.AddCommand(versionCmd, initCmd, registryCmd)
 	rootCmd.Execute()
 }
-
-// repoURL := "https://github.com/cyber-nic/tr4ck"
-// cloneRepo(repoURL)

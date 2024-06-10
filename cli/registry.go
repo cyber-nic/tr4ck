@@ -57,8 +57,8 @@ func saveRegistry(reg *Registry) error {
 	writer.Comma = '\t'
 	defer writer.Flush()
 
-	for url, guid := range reg.Repos {
-		err := writer.Write([]string{guid, url})
+	for uri, guid := range reg.Repos {
+		err := writer.Write([]string{guid, uri})
 		if err != nil {
 			return err
 		}
@@ -67,18 +67,18 @@ func saveRegistry(reg *Registry) error {
 	return nil
 }
 
-func updateRegistry(url, guid string) error {
+func updateRegistry(uri, guid string) error {
 	reg, err := loadRegistry()
 	if err != nil {
 		return err
 	}
 
-	reg.Repos[url] = guid
+	reg.Repos[uri] = guid
 	return saveRegistry(reg)
 }
 
-func addToRegistry(url string) error {
-	log.Debug().Msgf("Adding %s", url)
+func addToRegistry(uri string) error {
+	log.Debug().Msgf("Adding %s", uri)
 
 	// Open the registry file in read-write mode
 	file, err := os.OpenFile(registryFilePath, os.O_RDWR|os.O_APPEND, 0644)
@@ -87,25 +87,25 @@ func addToRegistry(url string) error {
 	}
 	defer file.Close()
 
-	// Check if the URL already exists
+	// Check if the URI already exists
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if scanner.Text() == url {
-			return fmt.Errorf("URL %s already exists in the registry", url)
+		if scanner.Text() == uri {
+			return fmt.Errorf("URI %s already exists in the registry", uri)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 
-	commitHash, err := getRepoGUIDFromFirstCommit(url)
+	commitHash, err := getRepoGUIDFromFirstCommit(uri)
 	if err != nil {
 		return fmt.Errorf("failed to clone repository: %v", err)
 	}
 
-	log.Debug().Str("url", url).Str("commitHash", commitHash).Msg("Adding repository to registry")
+	log.Debug().Str("uri", uri).Str("commitHash", commitHash).Msg("Adding repository to registry")
 
-	err = updateRegistry(url, commitHash)
+	err = updateRegistry(uri, commitHash)
 	if err != nil {
 		return fmt.Errorf("failed to update registry: %v", err)
 	}
