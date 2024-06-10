@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/rs/zerolog"
@@ -32,26 +34,26 @@ func init() {
 }
 
 // cloneRepo clones a repository at a specific commit hash or syncs it to the latest state if it already exists.
-func cloneRepo(record *RegistryRecord) (string, error) {
+func cloneRepo(record *RegistryRecord) (*git.Repository, error) {
 	dst := filepath.Join(os.TempDir(), "tr4ck", "archives", record.RootHash)
-	log.Debug().Str("dst", dst).Msg(aurora.BrightYellow(record.URI).String())
+	log.Trace().Str("dst", dst).Msg(record.URI)
 
 	// Check if the destination directory already exists
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		// If the repository exists, open it and pull the latest changes
 		repo, err := git.PlainOpen(dst)
 		if err != nil {
-			return "", fmt.Errorf("failed to open existing repository: %w", err)
+			return nil, fmt.Errorf("failed to open existing repository: %w", err)
 		}
 
 		w, err := repo.Worktree()
 		if err != nil {
-			return "", fmt.Errorf("failed to get worktree: %w", err)
+			return nil, fmt.Errorf("failed to get worktree: %w", err)
 		}
 
 		err = w.Pull(&git.PullOptions{RemoteName: "origin"})
 		if err != nil && err != git.NoErrAlreadyUpToDate {
-			return "", fmt.Errorf("failed to pull updates: %w", err)
+			return nil, fmt.Errorf("failed to pull updates: %w", err)
 		}
 
 		// Checkout the specific commit
@@ -60,10 +62,11 @@ func cloneRepo(record *RegistryRecord) (string, error) {
 			Hash: hash,
 		})
 		if err != nil {
-			return "", fmt.Errorf("failed to checkout commit: %w", err)
+			return nil, fmt.Errorf("failed to checkout commit: %w", err)
 		}
 
-		return dst, nil
+	
+		return repo, nil
 	}
 
 	// If the repository does not exist, clone it
@@ -73,13 +76,13 @@ func cloneRepo(record *RegistryRecord) (string, error) {
 		SingleBranch: true,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to clone repository: %w", err)
+		return nil, fmt.Errorf("failed to clone repository: %w", err)
 	}
 
 	// Checkout the specific commit
 	w, err := repo.Worktree()
 	if err != nil {
-		return "", fmt.Errorf("failed to get worktree: %w", err)
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
 	}
 
 	hash := plumbing.NewHash(record.RootHash)
@@ -87,18 +90,13 @@ func cloneRepo(record *RegistryRecord) (string, error) {
 		Hash: hash,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to checkout commit: %w", err)
+		return nil, fmt.Errorf("failed to checkout commit: %w", err)
 	}
 
-	return dst, nil
+	return repo, nil
 }
 
-func getLatestCommit(dst string) (string, error) {
-	repo, err := git.PlainOpen(dst)
-	if err != nil {
-		return "", fmt.Errorf("failed to open repository: %w", err)
-	}
-
+func getLatestCommit(repo *git.Repository) (string, error) {
 	ref, err := repo.Head()
 	if err != nil {
 		return "", fmt.Errorf("failed to get HEAD reference: %w", err)
@@ -111,6 +109,80 @@ func getLatestCommit(dst string) (string, error) {
 
 	return commit.Hash.String(), nil
 }
+
+var errStopIteration = errors.New("stop iteration")
+
+
+// listChangedFilesSinceCommit lists all files that have changed from the latest commit back to a specified commit
+func listChangedFilesSinceCommit(repo *git.Repository, sinceCommitHash string) ([]string, error) {
+	// Get the commit object for the specified commit hash
+	sinceCommit, err := repo.CommitObject(plumbing.NewHash(sinceCommitHash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit object for hash %s: %w", sinceCommitHash, err)
+	}
+
+	// Collect all changed files
+	changedFiles := make(map[string]struct{})
+
+	// Iterate through the commit history starting from HEAD
+	ref, err := repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HEAD reference: %w", err)
+	}
+
+	commitIter, err := repo.Log(&git.LogOptions{From: ref.Hash()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit logs: %w", err)
+	}
+
+	err = commitIter.ForEach(func(commit *object.Commit) error {
+		if commit.Hash == sinceCommit.Hash {
+			return errStopIteration
+		}
+
+		// Get the parent commit
+		parentCommit, err := commit.Parents().Next()
+		if err != nil {
+			return fmt.Errorf("failed to get parent commit: %w", err)
+		}
+
+		// Get the patch between the current commit and its parent
+		patch, err := parentCommit.Patch(commit)
+		if err != nil {
+			return fmt.Errorf("failed to generate patch: %w", err)
+		}
+
+		// Extract the changed files from the patch
+		for _, filePatch := range patch.FilePatches() {
+			from, to := filePatch.Files()
+
+			if from != nil && to != nil && from.Path() != to.Path() {
+				// This is a rename operation
+				delete(changedFiles, from.Path())
+				changedFiles[to.Path()] = struct{}{}
+			} else if to != nil {
+				// This is an addition or modification
+				changedFiles[to.Path()] = struct{}{}
+			}
+		}
+
+		return nil
+	})
+	if err != nil && err != errStopIteration {
+		return nil, fmt.Errorf("failed to iterate commits: %w", err)
+	}
+
+	// Convert the map keys to a slice
+	var files []string
+	for file := range changedFiles {
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
+
+
 
 func getRootHashFromFirstCommit(repoURI string) (string, error) {
 	// Initialize a new in-memory repository
@@ -165,22 +237,18 @@ func findDefaultRef(repo *git.Repository) (*plumbing.Reference, error) {
 	return nil, fmt.Errorf("failed to find default branch")
 }
 
-// func listRefs(repo *git.Repository	) error {
-// 	refs, err := repo.References()
-// 	if err != nil {
-// 		return fmt.Errorf("failed to get references: %w", err)
-// 	}
-
-// 	err = refs.ForEach(func(ref *plumbing.Reference) error {
-// 		fmt.Println(ref.Name(), ref.Hash())
-// 		return nil
-// 	})
-// 	if err != nil {
-// 		return fmt.Errorf("failed to iterate references: %w", err)
-// 	}
-
-// 	return nil
-// }
+// removes file types for which tracking is disabled
+func filterFiles(files []string) []string {
+	var filtered []string
+	for _, file := range files {
+		ext := filepath.Ext(file)
+		if ext == ".json" || ext == ".yaml" || ext == ".yml" || ext == ".sum" || ext == ".mod" {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
 
 func main() {
 	var rootCmd = &cobra.Command{
@@ -195,29 +263,56 @@ func main() {
 				}
 
 				for _, record := range *registry {
-					dst, err := cloneRepo(&record)
+					repo, err := cloneRepo(&record)
 					if err != nil {
-						log.Err(err).Str("dir", dst).Msg("Failed to clone repository")
+						log.Err(err).Str("uri", record.URI).Msg("Failed to clone repository")
 					}
 
+					// // get path from repo
+					// repodir, err := repo.Worktree()
+					// // to string
+					// dst := repodir.Filesystem.Root()
+
+
 					// print latest commit
-					lastestHash, err := getLatestCommit(dst)
+					lastestHash, err := getLatestCommit(repo)
 					if err != nil {
 						log.Err(err).Msg("Failed to print latest commit")
 					}
 
-					if record.LastestHash != lastestHash {
-						fmt.Printf("Out of sync: %s != %s\n", lastestHash, record.LastestHash)
+					if record.LastestHash == lastestHash {
+						log.Debug().Str("uri", record.URI).Str("latest", lastestHash).Msg(aurora.BrightYellow("Skip").String())
+						// no latest commit, skip
+						continue
 					}
-					// perform complete repo scan
+
+					log.Debug().Str("uri", record.URI).Str("latest", lastestHash).Str("hash", record.LastestHash).Msg(aurora.BrightYellow("Update").String())
+
+					commitHash := record.LastestHash
+					// handle possible empty latest commit hash
+					if commitHash == "" {
+						commitHash = record.RootHash
+					}
+
+					// list commits since last processed commit
+					files, err := listChangedFilesSinceCommit(repo, commitHash)
+					if err != nil {
+						log.Err(err).Msg("Failed to list files in latest commit")
+						continue
+					}
+
+					// filter out files. remove *.json, *.yaml, *.yml, *.sum, *.mod
+					files = filterFiles(files)
+
+					PrintStruct(os.Stdout, files)
 
 
-					// update registry
-					record.LastestHash = lastestHash
-					if err = updateRegistry(record); err != nil {
-						log.Err(err).Msg("Failed to update registry")
-					}
-					
+					// // update registry
+					// record.LastestHash = lastestHash
+					// if err = updateRegistry(record); err != nil {
+					// 	log.Err(err).Msg("Failed to update registry")
+					// }
+
 				}
 			}
 		},
