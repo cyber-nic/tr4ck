@@ -16,33 +16,64 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v2"
 )
 
 const version = "0.1.0"
 
-var registryFilePath string
-var markers = []string{"tr@ck", "todo", "fixme"}
-
-// Extensions to ignore
-var ignoredExtensions = map[string]struct{}{
-	".json": {},
-	".yaml": {},
-	".yml":  {},
-	".sum":  {},
-	".mod":  {},
-	".html": {},
-}
+var (
+	homeDir           string
+	configFilePath    string
+	registryFilePath  string
+	markers           []string
+	ignoreDirs        map[string]struct{}
+	ignoredExtensions map[string]struct{}
+)
 
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).With().Caller().Logger()
 
-	homeDir, err := os.UserHomeDir()
+	// Get the home directory
+	var err error
+	homeDir, err = os.UserHomeDir()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to get home directory")
 	}
 
+	// default registry path
 	registryFilePath = filepath.Join(homeDir, ".tr4ck.registry")
+	markers = []string{"tr@ck", "todo", "fixme"}
+
+	ignoreDirs = map[string]struct{}{
+		"__pycache__":   {},
+		".svn":          {},
+		".hg":           {},
+		".tox":          {},
+		".git":          {},
+		".DS_Store":     {},
+		".mypy_cache":   {},
+		".pytest_cache": {},
+		".cache":        {},
+		".idea":         {},
+		".vscode":       {},
+		"vendor":        {},
+		"build":         {},
+		"dist":          {},
+		"target":        {},
+		"node_modules":  {},
+	}
+
+	// Extensions to ignore
+	ignoredExtensions = map[string]struct{}{
+		".json": {},
+		".yaml": {},
+		".yml":  {},
+		".sum":  {},
+		".mod":  {},
+		".html": {},
+	}
+
 }
 
 // cloneRepo clones a repository at a specific commit hash or syncs it to the latest state if it already exists.
@@ -285,6 +316,14 @@ func listFilesWithMarkers(repo *git.Repository, markers []string) ([]string, err
 		if err != nil {
 			return err
 		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", ".idea", ".vscode", "vendor", "build",
+				"dist", ".cache", "target", ".DS_Store", ".svn", ".hg", ".tox",
+				"__pycache__", ".mypy_cache", ".pytest_cache":
+				return filepath.SkipDir
+			}
+		}
 		if !info.IsDir() {
 			// filter
 			ext := filepath.Ext(path)
@@ -342,10 +381,87 @@ func listFilesWithMarkersSinceCommit(repo *git.Repository, firstHash, latestHash
 	return filesWithMarkers, removedFiles, nil
 }
 
+type Config struct {
+	RegistryFilePath  string   `yaml:"registry_file_path"`
+	Markers           []string `yaml:"markers"`
+	IgnoreDirs        []string `yaml:"ignore_dirs"`
+	IgnoredExtensions []string `yaml:"ignore_extensions"`
+}
+
+func loadConfig(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return err
+	}
+
+	// update global registry file path
+	if config.RegistryFilePath != "" {
+		if registryFilePath[0] == '~' {
+			registryFilePath = filepath.Join(homeDir, registryFilePath[1:])
+		}
+	}
+
+	// update global markers
+	if len(config.Markers) > 0 {
+		markers = config.Markers
+	}
+
+	// update global ignore dirs
+	if len(config.IgnoreDirs) > 0 {
+		for _, dir := range config.IgnoreDirs {
+			ignoreDirs[dir] = struct{}{}
+		}
+	}
+
+	// update global ignored extensions
+	if len(config.IgnoredExtensions) > 0 {
+		for _, ext := range config.IgnoredExtensions {
+			ignoredExtensions[ext] = struct{}{}
+		}
+	}
+
+	return nil
+}
+
+func preRunConfig() {
+	if configFilePath == "" {
+		// default config path
+		configFilePath = filepath.Join(homeDir, ".tr4ck.conf")
+
+		// attempt to load default path
+		if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+			log.Trace().Msg("default config file does not exist")
+			return
+		}
+
+		loadConfig(configFilePath)
+
+		return
+	}
+
+	// replace ~ with home directory if first character
+	if configFilePath[0] == '~' {
+		configFilePath = filepath.Join(homeDir, configFilePath[1:])
+	}
+
+	loadConfig(configFilePath)
+
+	log.Trace().Any("markers", markers).Msg("loaded config")
+}
+
 func main() {
+	// root cmd with prerun to handle custom config file
+	// default is to scan all registered repos
 	var rootCmd = &cobra.Command{
 		Use:   "sync",
 		Short: "sync repos",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			preRunConfig()
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 {
 				registry, err := loadRegistry()
@@ -409,6 +525,9 @@ func main() {
 			}
 		},
 	}
+
+	// optional custom config file
+	rootCmd.PersistentFlags().StringVar(&configFilePath, "config", "", "config file path (optional)")
 
 	var scanCmd = &cobra.Command{
 		Use:   "scan",

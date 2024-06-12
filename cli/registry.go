@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -18,6 +19,10 @@ type RegistryRecord struct {
 }
 
 func loadRegistry() (*[]RegistryRecord, error) {
+	if registryFilePath[0] == '~' {
+		registryFilePath = filepath.Join(homeDir, registryFilePath[1:])
+	}
+
 	file, err := os.Open(registryFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open registry file: %w", err)

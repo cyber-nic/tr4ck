@@ -36,7 +36,7 @@ Information about the project's licensing.
 
 How to get in touch with the Tr4ck support team or community.
 
-# Baisc
+# Basics
 
 ```
 # list contents of the local registry
@@ -49,11 +49,65 @@ make run ARGS="init"
 make run ARGS="reg add https://github.com/cyber-nic/tr4ck"
 
 # add a local path to the registry
-make run ARGS="reg add /Users/ndelorme/code/saga/saga"
+make run ARGS="reg add /path/to/cyber-nic/tr4ck"
 
 # scan a repo as-is
 make run ARGS="scan https://github.com/cyber-nic/tr4ck"
 
 # sync registered repos and scan since latest commit for tr4cks
 make run ARGS=""
+
+# provide custom config file
+make run ARGS="--config=~/.tr4ck.conf reg ls"
 ```
+
+# Configuration
+Tr@ck has a built-in set of Markers, IgnoreDirs, and IgnoreExts. See below for details.
+
+By default, Tr@ck will look for a custom yaml configuration file located here: `~/.track.conf`. If this file exist its content will override app defaults.
+
+It is also possible to provide the location of a custom yaml configuration file using the parameter `--config=/path/to/file`. If this parameter is provided then default home directory location is ignored.
+
+## Registry File Path
+Tr@ck keeps things simple by storing state in a single file. This configuration can be overriden using the `registry_file_path` key.
+Default: ~/.tr4ck.registry
+
+## Markers
+Terms to search for when identifying techincal debt. This configuration can be overriden using the `markers` key. 
+
+Default:
+  - tr@ck
+  - todo
+  - fixme
+
+# IgnoreDirs
+Directories to ignore. This configuration can be overriden using the `ignore_dirs` key.
+
+Default:
+  - .git
+  - node_modules
+  - .idea
+  - .vscode
+  - vendor
+  - build
+  - dist
+  - .cache
+  - target
+  - .DS_Store
+  - .svn
+  - .hg
+  - .tox
+  - __pycache__
+  - .mypy_cache
+  - .pytest_cache
+
+# IgnoreExts
+File extensions to ignore. This configuration can be overriden using the `ignore_exts` key.
+
+Default:
+  - .json
+  - .yaml
+  - .yml
+  - .sum
+  - .mod
+  - .html

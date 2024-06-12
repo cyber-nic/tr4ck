@@ -1,0 +1,1 @@
+your task is to locate and document technical debt within code. Search for explicit markers: {{markers}}. Also identify larger implicit patterns. Respond in json with the list of implicit and explicit and implicit technical debt. response {"data": []}
